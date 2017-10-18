@@ -5,6 +5,14 @@ const Plugin = require("../Plugin");
 
 module.exports = class Quote extends Plugin {
 
+    constructor(...args) {
+        super(...args);
+
+        if (!this.db.quotes) {
+            this.db.quotes = [];
+        }
+    }
+
     static get plugin() {
         return {
             name: 'Quote',
@@ -16,19 +24,16 @@ module.exports = class Quote extends Plugin {
         };
     }
 
-    start() {
-        if (!this.db.quotes)
-            this.db.quotes = [];
+    get commands() {
+        return {
+            addquote: ({message}) => this.addQuote(message),
+            quote: ({args}) => {
+                if (args[0])
+                    return this.findQuote(args[0] - 1);
+                return this.randomQuote();
+            }
+        };
     }
-
-    get commands() { return {
-        addquote: ({message}) => this.addQuote(message),
-        quote: ({args}) => {
-            if (args[0])
-                return this.findQuote(args[0] - 1);
-            return this.randomQuote();
-        }
-    }; }
 
     addQuote(message) {
         if (message.reply_to_message === undefined ||
@@ -43,7 +48,7 @@ module.exports = class Quote extends Plugin {
             text
         });
 
-        return `Quote added with ID ${this.db.quotes.length}`;
+        return `Quote added with ID ${this.db.quotes.length - 1}`;
     }
 
     findQuote(id) {
@@ -56,7 +61,7 @@ module.exports = class Quote extends Plugin {
 
     randomQuote() {
         const id = Math.floor(Math.random() * this.db.quotes.length);
-        return this.findQuote(id, reply);
+        return this.findQuote(id);
     }
 
     getAuthor(obj) {

@@ -15,17 +15,16 @@ Array.prototype.unique = function() {
 
 module.exports = class Auth {
     constructor(config) {
-        fs.readFile("./db/helper_Auth.json", (err, data) => {
-            if (err) {
-                this.db = {
-                    auth: {},
-                    _globalAdmins: config.globalAdmins
-                };
-            } else {
-                this.db = JSON.parse(data);
-                this.db._globalAdmins = this.db._globalAdmins.concat(config.globalAdmins).unique();
-            }
-        });
+        try {
+            const data = fs.readFileSync("./db/helper_Auth.json", "utf-8");
+            this.db = JSON.parse(data);
+            this.db._globalAdmins = this.db._globalAdmins.concat(config.globalAdmins).unique();
+        } catch (err) {
+            this.db = {
+                auth: {},
+                _globalAdmins: config.globalAdmins
+            };
+        }
     }
 
     synchronize() {
@@ -38,25 +37,32 @@ module.exports = class Auth {
         );
     }
 
-    isMod(userId, chatId) {
+    isMod(_userId, _chatId) {
+        const userId = Number(_userId);
+        const chatId = Number(userId);
         if (this.isAdmin(userId, chatId)) {
             return true;
         }
         return this.getMods(chatId).includes(userId);
     }
 
-    isAdmin(userId, chatId) {
+    isAdmin(_userId, _chatId) {
+        const userId = Number(_userId);
+        const chatId = Number(userId);
         if (this.isGlobalAdmin(userId)) {
             return true;
         }
         return this.getAdmins(chatId).includes(userId);
     }
 
-    isGlobalAdmin(userId) {
+    isGlobalAdmin(_userId) {
+        const userId = Number(_userId);
         return this.getGlobalAdmins().includes(userId);
     }
 
-    addAdmin(userId, chatId) {
+    addAdmin(_userId, _chatId) {
+        const userId = Number(_userId);
+        const chatId = Number(userId);
         if (!this.db.auth[chatId])
             this.db.auth[chatId] = {};
 
@@ -67,7 +73,9 @@ module.exports = class Auth {
         this.synchronize();
     }
 
-    removeAdmin(userId, chatId) {
+    removeAdmin(_userId, _chatId) {
+        const userId = Number(_userId);
+        const chatId = Number(userId);
         if (!this.db.auth[chatId])
             this.db.auth[chatId] = {};
 
@@ -78,7 +86,9 @@ module.exports = class Auth {
         this.synchronize();
     }
 
-    addMod(userId, chatId) {
+    addMod(_userId, _chatId) {
+        const userId = Number(_userId);
+        const chatId = Number(userId);
         if (!this.db.auth[chatId])
             this.db.auth[chatId] = {};
 
@@ -89,7 +99,9 @@ module.exports = class Auth {
         this.synchronize();
     }
 
-    removeMod(userId, chatId) {
+    removeMod(_userId, _chatId) {
+        const userId = Number(_userId);
+        const chatId = Number(userId);
         if (!this.db.auth[chatId])
             this.db.auth[chatId] = {};
 
@@ -100,7 +112,8 @@ module.exports = class Auth {
         this.synchronize();
     }
 
-    addGlobalAdmin(userId) {
+    addGlobalAdmin(_userId) {
+        const userId = Number(_userId);
         if (!this.db._globalAdmins)
             this.db._globalAdmins = [];
 
@@ -108,14 +121,16 @@ module.exports = class Auth {
         this.synchronize();
     }
 
-    getMods(chatId) {
+    getMods(_chatId) {
+        const chatId = Number(_chatId);
         if (this.db.auth[chatId] && this.db.auth[chatId].mods) {
             return this.db.auth[chatId].mods;
         }
         return [];
     }
 
-    getAdmins(chatId) {
+    getAdmins(_chatId) {
+        const chatId = Number(_chatId);
         if (this.db.auth[chatId] && this.db.auth[chatId].admins) {
             return this.db.auth[chatId].admins;
         }

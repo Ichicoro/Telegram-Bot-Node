@@ -1,4 +1,6 @@
-const Log = require("./Log");
+const fs = require('fs');
+const path = require('path');
+const Logger = require("./Log");
 const MasterPlugin = require("./MasterPlugin");
 const Plugin = require("./Plugin");
 const Util = require("./Util");
@@ -7,11 +9,13 @@ const {EventEmitter} = require("events");
 // A small utility functor to find a plugin with a given name
 const nameMatches = targetName => pl => pl.plugin.name.toLowerCase() === targetName.toLowerCase();
 
+const SYNC_INTERVAL = 5000;
+
 module.exports = class PluginManager {
 
     constructor(bot, config, auth) {
         this.bot = bot;
-        this.log = Log.get("PluginManager", config);
+        this.log = new Logger("PluginManager", config);
         this.auth = auth;
         this.plugins = [];
         this.emitter = new EventEmitter();
@@ -23,12 +27,12 @@ module.exports = class PluginManager {
 
         this.config = config;
 
-        const events = [
-            "text", "audio", "document", "photo", "sticker", "video", "voice", "contact", "location",
-            "inline_query", "chosen_inline_request",
-            "new_chat_participant", "left_chat_participant", "group_chat_created",
-            "new_chat_title", "new_chat_photo", "delete_chat_photo"
-        ];
+        const events = Object.keys(Plugin.handlerNames)
+            // We handle the message event by ourselves.
+            .filter(prop => prop !== "message")
+            // Events beginning with an underscore (eg. _command) are internal.
+            .filter(prop => prop[0] !== "_");
+
         // Registers a handler for every Telegram event.
         // It runs the message through the proxy and forwards it to the plugin manager.
         for (const eventName of events) {
@@ -41,6 +45,10 @@ module.exports = class PluginManager {
                             .filter(plugin => (plugin.plugin.type & Plugin.Type.PROXY) === Plugin.Type.PROXY)
                             .map(plugin => plugin.proxy(eventName, message))
                         )
+                       .then(() => this.emit(
+                            "message",
+                            message
+                        ))
                        .then(() => this.emit(
                             eventName,
                             message
@@ -90,14 +98,12 @@ module.exports = class PluginManager {
                 } else {
                     response = "Couldn't load plugin.";
                 }
+            } else if (isGloballyEnabled) {
+                response = "Plugin already enabled.";
             } else {
-                if (isGloballyEnabled) {
-                    response = "Plugin already enabled.";
-                } else {
-                    this.log.info(`Enabling ${pluginName} from message interface`);
-                    const status = this.loadAndAdd(pluginName);
-                    response = status ? "Plugin enabled successfully." : "An error occurred.";
-                }
+                this.log.info(`Enabling ${pluginName} from message interface`);
+                const status = this.loadAndAdd(pluginName);
+                response = status ? "Plugin enabled successfully." : "An error occurred.";
             }
             break;
         case "disable":
@@ -109,13 +115,11 @@ module.exports = class PluginManager {
                 } else {
                     response = "Plugin isn't enabled.";
                 }
+            } else if (isGloballyEnabled) {
+                const outcome = this.removePlugin(pluginName);
+                response = outcome ? "Plugin disabled successfully." : "An error occurred.";
             } else {
-                if (isGloballyEnabled) {
-                    const outcome = this.removePlugin(pluginName);
-                    response = outcome ? "Plugin disabled successfully." : "An error occurred.";
-                } else {
-                    response = "Plugin already disabled.";
-                }
+                response = "Plugin already disabled.";
             }
             break;
         default:
@@ -127,12 +131,22 @@ module.exports = class PluginManager {
     // Instantiates the plugin.
     // Returns the plugin itself.
     loadPlugin(pluginName) {
-        const ThisPlugin = require(__dirname + '/plugins/' + pluginName);
+        const pluginPath = path.join(__dirname, 'plugins', pluginName);
+        /* Invalidates the require() cache.
+         * This allows for "hot fixes" to plugins: just /disable it, make the
+         * required changes, and /enable it again.
+         * If the cache wasn't invalidated, the plugin would be loaded from
+         * cache rather than from disk, meaning that your changes wouldn't apply.
+         * Method: https://stackoverflow.com/a/16060619
+         */
+        delete require.cache[require.resolve(pluginPath)];
+        const ThisPlugin = require(pluginPath);
 
         this.log.debug(`Required ${pluginName}`);
 
-        const loadedPlugin = new ThisPlugin(this.emitter, this.bot);
+        const loadedPlugin = new ThisPlugin(this.emitter, this.bot, this.config, this.auth);
 
+        // Bind all the methods from the bot API
         for (const method of Object.getOwnPropertyNames(Object.getPrototypeOf(this.bot))) {
             if (typeof this.bot[method] !== "function") continue;
             if (method === "constructor" || method === "on") continue;
@@ -141,8 +155,17 @@ module.exports = class PluginManager {
             loadedPlugin[method] = this.bot[method].bind(this.bot);
         }
 
+        // Load the blacklist and database from disk
+        const databasePath = PluginManager.getDatabasePath(loadedPlugin);
+
+        if (fs.existsSync(databasePath)) {
+            const {db, blacklist} = JSON.parse(fs.readFileSync(databasePath, "utf8"));
+
+            loadedPlugin.blacklist = new Set(blacklist);
+            loadedPlugin.db = db;
+        }
+
         this.log.debug(`Created ${pluginName}.`);
-        loadedPlugin.start(this.config, this.auth);
 
         return loadedPlugin;
     }
@@ -154,11 +177,15 @@ module.exports = class PluginManager {
     }
 
     // Returns true if the plugin was added successfully, false otherwise.
-    loadAndAdd(pluginName) {
+    loadAndAdd(pluginName, persist = true) {
         try {
             const plugin = this.loadPlugin(pluginName);
             this.log.debug(pluginName + " loaded correctly.");
             this.addPlugin(plugin);
+            if (persist) {
+                this.config.activePlugins.push(pluginName);
+                fs.writeFileSync("config.json", JSON.stringify(this.config,  null, 4));
+            }
             return true;
         } catch (e) {
             this.log.warn(e);
@@ -168,11 +195,11 @@ module.exports = class PluginManager {
     }
 
     // Load and add every plugin in the list.
-    loadPlugins(pluginNames) {
+    loadPlugins(pluginNames, persist = true) {
         this.log.verbose(`Loading and adding ${pluginNames.length} plugins...`);
         Error.stackTraceLimit = 5; // Avoid printing useless data in stack traces
 
-        const log = pluginNames.map(name => this.loadAndAdd(name));
+        const log = pluginNames.map(name => this.loadAndAdd(name, persist));
         if (log.some(result => result !== true)) {
             this.log.warn("Some plugins couldn't be loaded.");
         }
@@ -181,8 +208,12 @@ module.exports = class PluginManager {
     }
 
     // Returns true if at least one plugin was removed
-    removePlugin(pluginName) {
+    removePlugin(pluginName, persist = true) {
         this.log.verbose(`Removing plugin ${pluginName}`);
+        if (persist) {
+            this.config.activePlugins = this.config.activePlugins.filter(name => !nameMatches(pluginName));
+            fs.writeFileSync("config.json", JSON.stringify(this.config,  null, 4));
+        }
         const prevPluginNum = this.plugins.length;
         const isCurrentPlugin = nameMatches(pluginName);
         this.plugins.filter(isCurrentPlugin).forEach(pl => pl.stop());
@@ -195,27 +226,58 @@ module.exports = class PluginManager {
         return Promise.all(this.plugins.map(pl => pl.stop()));
     }
 
+    static getDatabasePath(plugin) {
+        return path.join(__dirname, '..', 'db', 'plugin_' + plugin.plugin.name + '.json');
+    }
+
+    startSynchronization() {
+        this.synchronizationInterval = setInterval(() => {
+            this.plugins.forEach(plugin => {
+                fs.writeFile(
+                    PluginManager.getDatabasePath(plugin),
+                    JSON.stringify({
+                        db: plugin.db,
+                        blacklist: Array.from(plugin.blacklist)
+                    }),
+                    err => {
+                        if (err) {
+                            this.log.error("Error synchronizing the database", err);
+                        }
+                    }
+                );
+            });
+        }, SYNC_INTERVAL);
+    }
+
+    stopSynchronization() {
+        if (this.synchronizationInterval) {
+            clearInterval(this.synchronizationInterval);
+        }
+    }
+
     emit(event, message) {
         this.log.debug(`Triggered event ${event}`);
 
-        // Command emitter
-        if (message.text !== undefined && message.entities && message.entities[0].type === "bot_command") {
-            const entity = message.entities[0];
+        if (event !== "message") {
+            // Command emitter
+            if (message.text !== undefined && message.entities && message.entities[0].type === "bot_command") {
+                const entity = message.entities[0];
 
-            const rawCommand = message.text.slice(entity.offset + 1, entity.offset + entity.length);
-            const [command] = rawCommand.replace(/\//, "").split("@");
+                const rawCommand = message.text.slice(entity.offset + 1, entity.offset + entity.length);
+                const [command] = rawCommand.replace(/\//, "").split("@");
 
-            let args = [];
-            if (entity.offset + entity.length < message.text.length) {
-                args = message.text.slice(entity.offset + entity.length + 1).split(" ");
+                let args = [];
+                if (entity.offset + entity.length < message.text.length) {
+                    args = message.text.slice(entity.offset + entity.length + 1).split(" ");
+                }
+
+                this.emitter.emit("_command", {message, command, args});
+            } else if (message.query !== undefined) {
+                const parts = message.query.split(" ");
+                const command = parts[0].toLowerCase();
+                const args = parts.length > 1 ? parts.slice(1) : [];
+                this.emitter.emit("_inline_command", {message, command, args});
             }
-
-            this.emitter.emit("_command", {message, command, args});
-        } else if (message.query !== undefined) {
-            const parts = message.query.split(" ");
-            const command = parts[0].toLowerCase();
-            const args = parts.length > 1 ? parts.slice(1) : [];
-            this.emitter.emit("_inline_command", {message, command, args});
         }
 
         this.emitter.emit(event, {message});

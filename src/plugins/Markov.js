@@ -72,21 +72,24 @@ class Blather {
 
 module.exports = class Markov extends Plugin {
 
+    constructor(...args) {
+        super(...args);
+
+        if (this.db) {
+            this.m = Blather.destringify(JSON.stringify(this.db));
+        } else {
+            this.m = new Blather();
+        }
+
+        this.rate = 0.02;
+    }
+
     static get plugin() {
         return {
             name: "Markov",
             description: "Generates random text.",
             help: "/markov, or `/markov <seed>`"
         };
-    }
-
-    start() {
-        if (this.db) {
-            this.m = Blather.destringify(JSON.stringify(this.db));
-        } else {
-            this.m = new Blather();
-        }
-        this.rate = 0.02;
     }
 
     onText({message}) {
@@ -104,11 +107,13 @@ module.exports = class Markov extends Plugin {
         this.sendMessage(message.chat.id, this.m.generateFragment(chat));
     }
 
-    get commands() { return {
-        markov: ({message, args}) => {
-            const chat = message.chat.id;
-            if (!this.m.dictionary[chat]) return;
-            return this.m.generateFragment(message.chat.id, (args.length > 0) ? args : undefined);
-        }
-    };}
+    get commands() {
+        return {
+            markov: ({message, args}) => {
+                const chat = message.chat.id;
+                if (!this.m.dictionary[chat]) return;
+                return this.m.generateFragment(message.chat.id, (args.length > 0) ? args : undefined);
+            }
+        };
+    }
 };

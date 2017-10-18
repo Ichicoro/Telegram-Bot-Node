@@ -1,8 +1,9 @@
 /* eslint-env node, es6, mocha */
-const PluginManager = require("../PluginManager");
-const config = JSON.parse(require("fs").readFileSync(__dirname + "/sample-config.json", "utf8"));
-const Auth = require("../helpers/Auth");
-let auth = new Auth(config);
+const PluginManager = require("../../src/PluginManager");
+const Auth = require("../../src/helpers/Auth");
+const TelegramBot = require('./helpers/TelegramBot')
+const config = require("./sample-config.json");
+const auth = new Auth(config);
 
 // Enables us to get around the "done called multiple times" without much repetition.
 const fixDone = done => {
@@ -11,52 +12,8 @@ const fixDone = done => {
         if (wasDoneCalled) return;
         wasDoneCalled = true;
         done(...args);
-    }
+    };
 };
-
-const EventEmitter = require("events");
-class TelegramBot extends EventEmitter {
-    constructor() {
-        super();
-        this.i = 0;
-        this.date = Math.floor(new Date() / 1000);
-    }
-
-    pushMessage(message, type = "text") {
-        if (!message.id)
-            message.message_id = this.i++;
-        if (!message.from)
-            message.from = {
-                id: 12345678,
-                first_name: 'Foobar',
-                username: 'foo_bar'
-            };
-        if (!message.chat)
-            message.chat = {
-                id: -123456789,
-                title: 'Test group',
-                type: 'group',
-                all_members_are_administrators: false
-            };
-        if (!message.date)
-            message.date = this.date++;
-        const cmdRegex = /\/[\w_]+/i;
-        if (cmdRegex.test(message.text))
-            message.entities = [{
-                type: "bot_command",
-                offset: 0,
-                length: message.text.match(cmdRegex)[0].length
-            }];
-        this.emit(type, message);
-    }
-    sendMessage(chatId, text, options) {
-        this.emit("_debug_message", {
-            chatId,
-            text,
-            options
-        });
-    }
-}
 
 describe("Bot", function() {
     let bot;
@@ -180,7 +137,7 @@ describe("Ignore", function() {
     it("should ignore", function(done) {
         this.slow(200);
         auth.addAdmin(1, -123456789);
-        const callback = ({text}) => done(new Error("The bot replied to a ping"));
+        const callback = () => done(new Error("The bot replied to a ping"));
         bot.on("_debug_message", callback);
         setTimeout(function() {
             bot.removeListener("_debug_message", callback);
@@ -208,7 +165,7 @@ describe("Ping", function() {
     });
 });
 
-describe("RateLimiter", function() {
+describe.skip("RateLimiter", function() {
     const bot = new TelegramBot();
     const pluginManager = new PluginManager(bot, config, auth);
     pluginManager.loadPlugins(["Ping"]);
@@ -234,5 +191,60 @@ describe("RateLimiter", function() {
             else
                 done(new Error(`The bot replied ${replies} times.`));
         }, 2 * limit); // The bot shouldn't take longer than 2 ms avg per message
+    });
+});
+
+describe("Scheduler", function() {
+    it("should initialize correctly", function() {
+        require("../../src/helpers/Scheduler");
+    });
+    it.skip("should schedule events", function(done) {
+        this.slow(1500);
+        const scheduler = require("../../src/helpers/Scheduler");
+        const delay = 1000;
+        const start = new Date();
+        scheduler.schedule(() => {
+            const end = new Date();
+            // Margin of error: +/- 100 ms
+            if ((start - end) > (delay + 100))
+                done(new Error(`Takes too long: ${start - end} ms`));
+            else if ((start - end) < (delay - 100))
+                done(new Error(`Takes too little: ${start - end} ms`));
+            else
+                done();
+        }, {}, delay);
+    });
+    it.skip("should cancel events", function(done) {
+        this.slow(1500);
+        const scheduler = require("../../src/helpers/Scheduler");
+        const doneTimeout = setTimeout(() => done(), 1000);
+        const errorEvent = scheduler.schedule(() => {
+            clearTimeout(doneTimeout);
+            done(new Error("Event was not cancelled"));
+        }, {}, 500);
+        scheduler.cancel(errorEvent);
+    });
+    it.skip("should look up events by metadata", function(done) {
+        this.slow(1500);
+        let isFinished = false;
+        const scheduler = require("../../src/helpers/Scheduler");
+        const doneTimeout = setTimeout(() => done(), 1000);
+        scheduler.schedule(() => {
+            if (isFinished)
+                return; // Prevents "done called twice" errors
+            clearTimeout(doneTimeout);
+            done(new Error("Event was not cancelled"));
+        }, {
+            name: "My test event",
+            color: "red"
+        }, 500);
+        const errorEvent = scheduler.search(event => event.name === "My test event" && event.color === "red");
+        if (!errorEvent) {
+            isFinished = true;
+            clearTimeout(doneTimeout);
+            done(new Error("Event not found"));
+            return;
+        }
+        scheduler.cancel(errorEvent);
     });
 });
