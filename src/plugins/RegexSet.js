@@ -6,17 +6,14 @@ function dashArgs(spaceArgs) {
         // Get the original string
         .join(" ")
         // Split by dash
-        .split("-")
-        // Simply splitting will add spaces around the string. Fix that.
-        .map(token => token.trim(" "));
+        .split(" - ");
 }
 
 module.exports = class RegexSet extends Plugin {
+    constructor(obj) {
+        super(obj);
 
-    constructor(listener, bot, config, auth) {
-        super(listener, bot, config, auth);
-
-        this.auth = auth;
+        this.auth = obj.auth;
         if (!this.db.replacements) {
             this.db.replacements = [];
         }
@@ -26,7 +23,7 @@ module.exports = class RegexSet extends Plugin {
         return {
             name: "RegexSet",
             description: "Regex-capable set command",
-            help: 'Syntax: `/regexset trigger - flags - replacement`, or `/regexset trigger - replacement`\nExamples:\n/regexset fo+ - i - bar'
+            help: "Syntax: `/regexset trigger - flags - replacement`, or `/regexset trigger - replacement`\nExamples:\n/regexset fo+ - i - bar"
         };
     }
 

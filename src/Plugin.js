@@ -1,31 +1,13 @@
 const Logger = require("./Log");
 
 module.exports = class Plugin {
-
-    static get Type() {
-        return {
-            NORMAL: 0x01,
-            INLINE: 0x02,
-            PROXY: 0x04,
-            SPECIAL: 0x08
-        };
-    }
-
-    static get Visibility() {
-        return {
-            VISIBLE: 0,
-            HIDDEN: 1
-        };
-    }
-
     static get plugin() {
         return {
             name: "Plugin",
             description: "Base Plugin",
             help: "There is no need to ask for help",
 
-            visibility: Plugin.Visibility.HIDDEN,
-            type: Plugin.Type.SPECIAL
+            isHidden: true
         };
     }
 
@@ -42,13 +24,14 @@ module.exports = class Plugin {
             contact: "onContact",
             document: "onDocument",
             inline_query: "onInline",
-            left_chat_participant: "onLeftChatParticipant",
+            left_chat_member: "onLeftChatMember",
             location: "onLocation",
-            new_chat_participant: "onNewChatParticipant",
+            new_chat_members: "onNewChatMembers",
             photo: "onPhoto",
             sticker: "onSticker",
             text: "onText",
             video: "onVideo",
+            video_note: "onVideoNote",
             voice: "onVoice"
         };
     }
@@ -57,28 +40,28 @@ module.exports = class Plugin {
         return this.constructor.plugin;
     }
 
-    constructor(listener, bot, config, auth) {
+    constructor({db, blacklist, emitter, bot, config, auth}) {
         if (new.target === Plugin) {
             throw new TypeError("Cannot construct Plugin instances directly!");
         }
 
         this.log = new Logger(this.plugin.name, config);
-        this.listener = listener;
+        this.listener = emitter;
 
-        this.db = {};
-        this.blacklist = new Set(); // Chats where the plugin is disabled
+        this.db = db;
+        this.blacklist = new Set(blacklist); // Chats where the plugin is disabled
         this.handlers = {};
 
         const eventNames = Object.keys(Plugin.handlerNames);
         for (const eventName of eventNames) {
             const handlerName = Plugin.handlerNames[eventName];
-            if (typeof this[handlerName] !== 'function') continue;
+            if (typeof this[handlerName] !== "function") continue;
             const isEnabled = id => !this.blacklist.has(id); // A function that says whether the plugin is enabled or not in a given chat.
             const eventHandler = this[handlerName].bind(this); // A function that refers to the appropriate handler (this.onText, this.onCommand, etc.)
-            const wrappedHandler = function({message}) {
-                if (("chat" in message) && !isEnabled(message.chat.id)) // If the plugin is disabled in this chat
+            const wrappedHandler = function(arg) {
+                if (("chat" in arg.message) && !isEnabled(arg.message.chat.id)) // If the plugin is disabled in this chat
                     return;
-                eventHandler.apply(null, arguments);
+                eventHandler(arg);
             }; // A function that receives the event, checks the message against the blacklist, and calls the appropriate handler
             this.listener.on(eventName, wrappedHandler);
             this.handlers[eventName] = wrappedHandler; // Keeps a reference to the handler so that it can be removed later

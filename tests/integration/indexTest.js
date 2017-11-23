@@ -1,19 +1,38 @@
 /* eslint-env node, es6, mocha */
 const PluginManager = require("../../src/PluginManager");
 const Auth = require("../../src/helpers/Auth");
-const TelegramBot = require('./helpers/TelegramBot')
+const TelegramBot = require("./helpers/TelegramBot");
 const config = require("./sample-config.json");
 const auth = new Auth(config);
 
-// Enables us to get around the "done called multiple times" without much repetition.
-const fixDone = done => {
-    let wasDoneCalled = false;
-    return (...args) => {
-        if (wasDoneCalled) return;
-        wasDoneCalled = true;
-        done(...args);
-    };
-};
+let i = 0;
+function makeSentinel() {
+    return `Sentinel<${i++}>`;
+}
+
+function expectsAnyMessage(bot) {
+    return new Promise(resolve => bot.on("_debug_message", resolve));
+}
+
+function expectsMessage(bot, target) {
+    // Todo: cleanup listener
+    return new Promise(resolve => bot.on("_debug_message", ({text}) => {
+        if (text === target) resolve();
+    }));
+}
+
+function notExpectsMessage(bot, target, errorText = "Should not have received message", delay = 500) {
+    // Todo: cleanup listener
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(resolve, delay);
+        bot.on("_debug_message", ({text}) => {
+            if (text !== target)
+                return;
+            clearTimeout(timeout);
+            reject(new Error(errorText));
+        });
+    });
+}
 
 describe("Bot", function() {
     let bot;
@@ -23,135 +42,78 @@ describe("Bot", function() {
         pluginManager = new PluginManager(bot, config, auth);
         pluginManager.loadPlugins(["Ping"]); // [] = Active plugins
     });
-    it("should reply to /help", function(done) {
+    it("should reply to /help", function() {
+        const p = expectsAnyMessage(bot);
         bot.pushMessage({text: "/help"});
-        bot.once("_debug_message", function() {
-            done();
-        });
+        return p;
     });
-    it("should reply to /help Ping", function(done) {
+    it("should reply to /help Ping", function() {
+        const p = expectsAnyMessage(bot);
         bot.pushMessage({text: "/help Ping"});
-        bot.once("_debug_message", function() {
-            done();
-        });
+        return p;
     });
-    it("should enable plugins", function(done) {
-        const sentinel = Math.random().toString();
-        bot.on("_debug_message", function({text}) {
-            if (text.includes(sentinel)) done();
-        });
-        bot.pushMessage({
-            text: "/enable Echo",
-            from: {
-                id: 1,
-                first_name: 'Root',
-                username: 'root'
-            }
-        });
+    it("should enable plugins", function() {
+        const sentinel = makeSentinel();
+        const p = expectsMessage(bot, sentinel);
+        bot.pushRootMessage({text: "/enable Echo"});
         bot.pushMessage({text: `/echo ${sentinel}`});
+        return p;
     });
-    it("should disable plugins", function(_done) {
+    it("should disable plugins", function() {
         this.slow(1100);
-        const done = fixDone(_done);
-        const sentinel = Math.random().toString();
-        const callback = ({text}) => {
-            if (text.includes(sentinel)) done(new Error("Echo wasn't disabled"));
-        };
-        bot.on("_debug_message", callback);
-        setTimeout(function() {
-            bot.removeListener("_debug_message", callback);
-            done();
-        }, 1000);
+        const sentinel = makeSentinel();
+        const p = notExpectsMessage(bot, sentinel, "Echo wasn't disabled");
 
-        bot.pushMessage({
-            text: "/disable Echo",
-            from: {
-                id: 1,
-                first_name: 'Root',
-                username: 'root'
-            }
-        });
+        bot.pushRootMessage({text: "/disable Echo"});
         bot.pushMessage({text: `/echo ${sentinel}`});
+        return p;
     });
-    it("shouldn't let unauthorized users enable plugins", function(_done) {
+    it("shouldn't let unauthorized users enable plugins", function() {
         this.slow(200);
-        const done = fixDone(_done);
-        const sentinel = Math.random().toString();
-        const callback = ({text}) => {
-            if (text.includes(sentinel)) done(new Error("Echo was enabled"));
-        };
-        bot.on("_debug_message", callback);
-        setTimeout(function() {
-            bot.removeListener("_debug_message", callback);
-            done();
-        }, 100);
+        const sentinel = makeSentinel();
+        const p = notExpectsMessage(bot, sentinel, "Echo was enabled");
 
-        bot.pushMessage({
-            text: "/enable echo",
-            from: {
-                id: 1000,
-                first_name: 'Evil Eve',
-                username: 'eve'
-            }
-        });
+        bot.pushEvilMessage({text: "/enable Echo"});
         bot.pushMessage({text: `/echo ${sentinel}`});
+        return p;
     });
-    it("shouldn't let unauthorized users disable plugins", function(_done) {
-        this.slow(200);
-        const done = fixDone(_done);
+    it("shouldn't let unauthorized users disable plugins", function() {
         pluginManager.loadPlugins(["Echo"]);
-        const sentinel = Math.random().toString();
-        const callback = ({text}) => {
-            if (text.includes(sentinel)) done();
-        };
-        bot.on("_debug_message", callback);
+        const sentinel = makeSentinel();
+        const p = expectsMessage(bot, sentinel);
 
-        bot.pushMessage({
-            text: "/disable echo",
-            from: {
-                id: 1000,
-                first_name: 'Evil Eve',
-                username: 'eve'
-            }
-        });
+        bot.pushEvilMessage({text: "/disable Echo"});
         bot.pushMessage({text: `/echo ${sentinel}`});
+        return p;
     });
-    it("should support multiline inputs", function(done) {
+    it("should support multiline inputs", function() {
         pluginManager.loadPlugins(["Echo"]);
-        const string = "foo\nbar";
-        bot.once("_debug_message", function({text}) {
-            if (text !== string) {
-                done(new Error(`Expected ${JSON.stringify(string)}, got ${JSON.stringify(text)}`));
-                return;
-            }
-            done();
-        });
+        const string = makeSentinel() + "\n" + makeSentinel();
+        const p = expectsMessage(bot, string);
         bot.pushMessage({text: `/echo ${string}`});
+        return p;
     });
 });
 
 describe("Ignore", function() {
     const bot = new TelegramBot();
     const pluginManager = new PluginManager(bot, config, auth);
-    pluginManager.loadPlugins(["Auth", "Ping"]);
-    it("should ignore", function(done) {
-        this.slow(200);
-        auth.addAdmin(1, -123456789);
-        const callback = () => done(new Error("The bot replied to a ping"));
-        bot.on("_debug_message", callback);
-        setTimeout(function() {
-            bot.removeListener("_debug_message", callback);
-            done();
-        }, 100);
+    pluginManager.loadPlugins(["Echo", "Ignore"]);
+    it("should ignore", function() {
+        const sentinel = makeSentinel();
+        const p = notExpectsMessage(bot, sentinel, "The bot replied to an echo");
 
-        bot.pushMessage({
-            text: "/ignore 123",
+        bot.pushRootMessage({text: "/ignore 123"});
+        // Give Ignore some time to react
+        setTimeout(() => bot.pushMessage({
+            text: `/echo ${sentinel}`,
             from: {
-                id: 1,
-                first_name: 'Root',
-                username: 'root'
+                id: 123,
+                first_name: "Foo Bar",
+                username: "foobar"
             }
-        });
+        }), 50);
+        return p;
     });
 });
 
@@ -159,38 +121,46 @@ describe("Ping", function() {
     const bot = new TelegramBot();
     const pluginManager = new PluginManager(bot, config, auth);
     pluginManager.loadPlugins(["Ping"]);
-    it("should reply to /ping", function(done) {
-        bot.once("_debug_message", () => done());
+    it("should reply to /ping", function() {
+        const p = expectsAnyMessage(bot);
         bot.pushMessage({text: "ping"});
+        return p;
     });
 });
 
-describe.skip("RateLimiter", function() {
+describe("Antiflood", function() {
     const bot = new TelegramBot();
     const pluginManager = new PluginManager(bot, config, auth);
-    pluginManager.loadPlugins(["Ping"]);
-    it("should reject spam", function(done) {
-        this.timeout(6000);
-        this.slow(6000);
-        const limit = 50;
+    pluginManager.loadPlugins(["Antiflood", "Echo"]);
+    it("should reject spam", async function() {
+        this.timeout(4000);
+        this.slow(3000);
+        const sentinel = makeSentinel();
+        const spamAmount = 50;
+        const spamLimit = 5;
         let replies = 0;
 
-        pluginManager.loadPlugins(["RateLimiter"]);
-
-        const callback = () => replies++;
+        const callback = ({text}) => {
+            if (text === sentinel)
+                replies++;
+        };
         bot.on("_debug_message", callback);
 
-        for (let i = 0; i < limit; i++)
-            bot.pushMessage({text: "ping"});
+        bot.pushRootMessage({text: `/floodignore ${spamLimit}`});
 
-        setTimeout(function() {
-            bot.removeListener("_debug_message", callback);
-            pluginManager.removePlugin("RateLimiter");
-            if (replies === 1)
-                done();
+        // Leave the plugin some time to set up the thing
+        await (new Promise(resolve => setTimeout(() => resolve(), 100)));
+
+        for (let i = 0; i < spamAmount; i++)
+            bot.pushMessage({text: `/echo ${sentinel}`});
+
+        return new Promise((resolve, reject) => setTimeout(function() {
+            // bot.removeListener("_debug_message", callback);
+            if (replies === spamLimit)
+                resolve();
             else
-                done(new Error(`The bot replied ${replies} times.`));
-        }, 2 * limit); // The bot shouldn't take longer than 2 ms avg per message
+                reject(new Error(`The bot replied ${replies} times.`));
+        }, 50 * spamAmount)); // The bot shouldn't take longer than 50 ms avg per message
     });
 });
 
@@ -201,9 +171,10 @@ describe("Scheduler", function() {
     it.skip("should schedule events", function(done) {
         this.slow(1500);
         const scheduler = require("../../src/helpers/Scheduler");
+        const sentinel = makeSentinel();
         const delay = 1000;
         const start = new Date();
-        scheduler.schedule(() => {
+        scheduler.on(sentinel, () => {
             const end = new Date();
             // Margin of error: +/- 100 ms
             if ((start - end) > (delay + 100))
@@ -212,32 +183,37 @@ describe("Scheduler", function() {
                 done(new Error(`Takes too little: ${start - end} ms`));
             else
                 done();
-        }, {}, delay);
+        });
+        scheduler.schedule(sentinel, {}, new Date(start + delay));
     });
     it.skip("should cancel events", function(done) {
         this.slow(1500);
         const scheduler = require("../../src/helpers/Scheduler");
+        const sentinel = makeSentinel();
         const doneTimeout = setTimeout(() => done(), 1000);
-        const errorEvent = scheduler.schedule(() => {
+        sentinel.on(sentinel, () => {
             clearTimeout(doneTimeout);
             done(new Error("Event was not cancelled"));
-        }, {}, 500);
+        }, {}, new Date(new Date() + 500));
+        const errorEvent = scheduler.schedule(sentinel, {});
         scheduler.cancel(errorEvent);
     });
     it.skip("should look up events by metadata", function(done) {
         this.slow(1500);
-        let isFinished = false;
         const scheduler = require("../../src/helpers/Scheduler");
+        const sentinel = makeSentinel();
+        let isFinished = false;
         const doneTimeout = setTimeout(() => done(), 1000);
-        scheduler.schedule(() => {
+        scheduler.on(sentinel, () => {
             if (isFinished)
                 return; // Prevents "done called twice" errors
             clearTimeout(doneTimeout);
             done(new Error("Event was not cancelled"));
-        }, {
+        });
+        scheduler.schedule(sentinel, {
             name: "My test event",
             color: "red"
-        }, 500);
+        }, new Date(new Date() + 500));
         const errorEvent = scheduler.search(event => event.name === "My test event" && event.color === "red");
         if (!errorEvent) {
             isFinished = true;

@@ -1,9 +1,7 @@
-const fs = require('fs');
-const path = require('path');
+const fs = require("fs");
+const path = require("path");
 const Logger = require("./Log");
-const MasterPlugin = require("./MasterPlugin");
 const Plugin = require("./Plugin");
-const Util = require("./Util");
 const {EventEmitter} = require("events");
 
 // A small utility functor to find a plugin with a given name
@@ -11,8 +9,33 @@ const nameMatches = targetName => pl => pl.plugin.name.toLowerCase() === targetN
 
 const SYNC_INTERVAL = 5000;
 
-module.exports = class PluginManager {
+function messageIsCommand(message) {
+    if (!message.entities) return;
+    const entity = message.entities[0];
+    return entity.offset === 0 && entity.type === "bot_command";
+}
 
+// Note: we only parse commands at the start of the message,
+// therefore we suppose entity.offset = 0
+function parseCommand(message) {
+    const entity = message.entities[0];
+
+    const rawCommand = message.text.substring(1, entity.length);
+    let command;
+    if (rawCommand.search("@") === -1)
+        command = rawCommand;
+    else
+        command = rawCommand.substring(0, rawCommand.search("@"));
+
+    let args = [];
+    if (message.text.length > entity.length) {
+        args = message.text.slice(entity.length + 1).split(" ");
+    }
+
+    return {args, command};
+}
+
+module.exports = class PluginManager {
     constructor(bot, config, auth) {
         this.bot = bot;
         this.log = new Logger("PluginManager", config);
@@ -20,10 +43,6 @@ module.exports = class PluginManager {
         this.plugins = [];
         this.emitter = new EventEmitter();
         this.emitter.setMaxListeners(Infinity);
-
-        this.masterPlugin = new MasterPlugin(this.emitter, this, config);
-        this.masterPlugin.sendMessage = this.bot.sendMessage.bind(this.bot); // Dirty patch
-        this.addPlugin(this.masterPlugin);
 
         this.config = config;
 
@@ -39,17 +58,17 @@ module.exports = class PluginManager {
             bot.on(
                 eventName,
                 message => {
-                    this.parseEnableDisable(message);
+                    this.parseHardcoded(message);
                     Promise.all(
                         this.plugins
-                            .filter(plugin => (plugin.plugin.type & Plugin.Type.PROXY) === Plugin.Type.PROXY)
+                            .filter(plugin => plugin.plugin.isProxy)
                             .map(plugin => plugin.proxy(eventName, message))
-                        )
-                       .then(() => this.emit(
+                    )
+                        .then(() => this.emit(
                             "message",
                             message
                         ))
-                       .then(() => this.emit(
+                        .then(() => this.emit(
                             eventName,
                             message
                         ))
@@ -61,77 +80,97 @@ module.exports = class PluginManager {
         }
     }
 
-    parseEnableDisable(message) {
-        // Hardcoded hot-swap plugin
-        if (!message.text) return;
-        const parts = Util.parseCommand(
-            message.text,
-            [
-                "enable",
-                "disable"
-            ],
-            {
-                overrideDeprecation: true
-            }
-        );
-        if (!parts) return;
-        if (!this.auth.isAdmin(message.from.id)) return;
+    parseHardcoded(message) {
+        // Hardcoded commands
+        if (!messageIsCommand(message)) return;
+        const {command, args: [pluginName, targetChat]} = parseCommand(message);
+        // Skip everything if we're not interested in this command
+        if (command !== "help" && command !== "enable" && command !== "disable") return;
+
+        const response = this.processHardcoded(command, pluginName, targetChat, message);
+        this.bot.sendMessage(message.chat.id, response, {
+            parse_mode: "markdown",
+            disable_web_page_preview: true
+        });
+    }
+
+    processHardcoded(command, pluginName, targetChat, message) {
+        if (command === "help") {
+            const availablePlugins = this.plugins
+                .map(pl => pl.plugin)
+                .filter(pl => !pl.isHidden);
+
+            if (!pluginName)
+                return availablePlugins
+                    .map(pl => `*${pl.name}*: ${pl.description}`)
+                    .join("\n");
+
+            const plugin = availablePlugins
+                .find(pl => pl.name.toLowerCase() === pluginName.toLowerCase());
+
+            if (!plugin)
+                return "No such plugin.";
+            return `*${plugin.name}* - ${plugin.description}\n\n${plugin.help}`;
+        }
+
+        if (!this.auth.isAdmin(message.from.id, message.chat.id)) return;
         // Syntax: /("enable"|"disable") pluginName [targetChat|"chat"]
         // The string "chat" will enable the plugin in the current chat.
-        let [command, pluginName, targetChat] = parts;
         if (targetChat === "chat") targetChat = message.chat.id;
         targetChat = Number(targetChat);
         // Checks if it is already in this.plugins
         const isGloballyEnabled = this.plugins.some(nameMatches(pluginName));
-        let response;
         switch (command) {
         case "enable":
+            if (isGloballyEnabled)
+                return "Plugin already enabled.";
             if (targetChat) {
-                // Enable it if necessary
-                let status = true;
-                if (!isGloballyEnabled)
-                    status = this.loadAndAdd(pluginName);
-                if (status) {
+                try {
+                    this.loadAndAdd(pluginName);
                     const plugin = this.plugins.find(nameMatches(pluginName));
                     plugin.blacklist.delete(targetChat);
-                    response = `Plugin enabled successfully for chat ${targetChat}.`;
-                } else {
-                    response = "Couldn't load plugin.";
+                    return `Plugin enabled successfully for chat ${targetChat}.`;
+                } catch (e) {
+                    this.log.warn(e);
+                    if (/^Cannot find module/.test(e.message))
+                        return "No such plugin. Did you spell it correctly? Note that names are case-sensitive.";
+                    return "Couldn't load plugin: " + e.message;
                 }
-            } else if (isGloballyEnabled) {
-                response = "Plugin already enabled.";
-            } else {
-                this.log.info(`Enabling ${pluginName} from message interface`);
-                const status = this.loadAndAdd(pluginName);
-                response = status ? "Plugin enabled successfully." : "An error occurred.";
             }
-            break;
+
+            this.log.info(`Enabling ${pluginName} from message interface`);
+            try {
+                this.loadAndAdd(pluginName);
+                return "Plugin enabled successfully.";
+            } catch (e) {
+                this.log.warn(e);
+                if (!/^Cannot find module/.test(e.message))
+                    return "Couldn't load plugin, check console for errors.";
+                if (/src.plugins/.test(e.message))
+                    return "No such plugin. Did you spell it correctly? Note that names are case-sensitive.";
+                return e.message.replace(/Cannot find module '([^']+)'/, "The plugin has a missing dependency: `$1`");
+            }
+
         case "disable":
             if (targetChat) {
-                if (isGloballyEnabled) {
-                    const plugin = this.plugins.find(nameMatches(pluginName));
-                    plugin.blacklist.add(targetChat);
-                    response = `Plugin disabled successfully for chat ${targetChat}.`;
-                } else {
-                    response = "Plugin isn't enabled.";
-                }
-            } else if (isGloballyEnabled) {
-                const outcome = this.removePlugin(pluginName);
-                response = outcome ? "Plugin disabled successfully." : "An error occurred.";
-            } else {
-                response = "Plugin already disabled.";
+                if (!isGloballyEnabled)
+                    return "Plugin isn't enabled.";
+                const plugin = this.plugins.find(nameMatches(pluginName));
+                plugin.blacklist.add(targetChat);
+                return `Plugin disabled successfully for chat ${targetChat}.`;
             }
-            break;
-        default:
-            break;
+            if (isGloballyEnabled) {
+                const outcome = this.removePlugin(pluginName);
+                return outcome ? "Plugin disabled successfully." : "An error occurred.";
+            }
+            return "Plugin already disabled.";
         }
-        this.bot.sendMessage(message.chat.id, response);
     }
 
     // Instantiates the plugin.
     // Returns the plugin itself.
     loadPlugin(pluginName) {
-        const pluginPath = path.join(__dirname, 'plugins', pluginName);
+        const pluginPath = path.join(__dirname, "plugins", pluginName);
         /* Invalidates the require() cache.
          * This allows for "hot fixes" to plugins: just /disable it, make the
          * required changes, and /enable it again.
@@ -144,25 +183,33 @@ module.exports = class PluginManager {
 
         this.log.debug(`Required ${pluginName}`);
 
-        const loadedPlugin = new ThisPlugin(this.emitter, this.bot, this.config, this.auth);
+        // Load the blacklist and database from disk
+        const databasePath = PluginManager.getDatabasePath(pluginName);
+        let db = {};
+        let blacklist = [];
+
+        if (fs.existsSync(databasePath)) {
+            const data = JSON.parse(fs.readFileSync(databasePath, "utf8"));
+            db = data.db;
+            blacklist = data.blacklist;
+        }
+
+        const loadedPlugin = new ThisPlugin({
+            db,
+            blacklist,
+            emitter: this.emitter,
+            bot: this.bot,
+            config: this.config,
+            auth: this.auth
+        });
 
         // Bind all the methods from the bot API
         for (const method of Object.getOwnPropertyNames(Object.getPrototypeOf(this.bot))) {
             if (typeof this.bot[method] !== "function") continue;
-            if (method === "constructor" || method === "on") continue;
+            if (method === "constructor" || method === "on" || method === "onText") continue;
             if (/^_/.test(method)) continue; // Do not expose internal methods
             this.log.debug(`Binding ${method}`);
             loadedPlugin[method] = this.bot[method].bind(this.bot);
-        }
-
-        // Load the blacklist and database from disk
-        const databasePath = PluginManager.getDatabasePath(loadedPlugin);
-
-        if (fs.existsSync(databasePath)) {
-            const {db, blacklist} = JSON.parse(fs.readFileSync(databasePath, "utf8"));
-
-            loadedPlugin.blacklist = new Set(blacklist);
-            loadedPlugin.db = db;
         }
 
         this.log.debug(`Created ${pluginName}.`);
@@ -184,13 +231,11 @@ module.exports = class PluginManager {
             this.addPlugin(plugin);
             if (persist) {
                 this.config.activePlugins.push(pluginName);
-                fs.writeFileSync("config.json", JSON.stringify(this.config,  null, 4));
+                fs.writeFileSync("config.json", JSON.stringify(this.config, null, 4));
             }
-            return true;
         } catch (e) {
-            this.log.warn(e);
             this.log.warn(`Failed to initialize plugin ${pluginName}.`);
-            return false;
+            throw e;
         }
     }
 
@@ -199,7 +244,15 @@ module.exports = class PluginManager {
         this.log.verbose(`Loading and adding ${pluginNames.length} plugins...`);
         Error.stackTraceLimit = 5; // Avoid printing useless data in stack traces
 
-        const log = pluginNames.map(name => this.loadAndAdd(name, persist));
+        const log = pluginNames.map(name => {
+            try {
+                this.loadAndAdd(name, persist);
+                return true;
+            } catch (e) {
+                this.log.warn(e);
+                return false;
+            }
+        });
         if (log.some(result => result !== true)) {
             this.log.warn("Some plugins couldn't be loaded.");
         }
@@ -211,8 +264,8 @@ module.exports = class PluginManager {
     removePlugin(pluginName, persist = true) {
         this.log.verbose(`Removing plugin ${pluginName}`);
         if (persist) {
-            this.config.activePlugins = this.config.activePlugins.filter(name => !nameMatches(pluginName));
-            fs.writeFileSync("config.json", JSON.stringify(this.config,  null, 4));
+            this.config.activePlugins = this.config.activePlugins.filter(name => !nameMatches(name));
+            fs.writeFileSync("config.json", JSON.stringify(this.config, null, 4));
         }
         const prevPluginNum = this.plugins.length;
         const isCurrentPlugin = nameMatches(pluginName);
@@ -226,15 +279,16 @@ module.exports = class PluginManager {
         return Promise.all(this.plugins.map(pl => pl.stop()));
     }
 
-    static getDatabasePath(plugin) {
-        return path.join(__dirname, '..', 'db', 'plugin_' + plugin.plugin.name + '.json');
+    static getDatabasePath(pluginName) {
+        return path.join(__dirname, "..", "db", "plugin_" + pluginName + ".json");
     }
 
     startSynchronization() {
         this.synchronizationInterval = setInterval(() => {
+            this.log.debug("Starting synchronization");
             this.plugins.forEach(plugin => {
                 fs.writeFile(
-                    PluginManager.getDatabasePath(plugin),
+                    PluginManager.getDatabasePath(plugin.plugin.name),
                     JSON.stringify({
                         db: plugin.db,
                         blacklist: Array.from(plugin.blacklist)
@@ -260,17 +314,8 @@ module.exports = class PluginManager {
 
         if (event !== "message") {
             // Command emitter
-            if (message.text !== undefined && message.entities && message.entities[0].type === "bot_command") {
-                const entity = message.entities[0];
-
-                const rawCommand = message.text.slice(entity.offset + 1, entity.offset + entity.length);
-                const [command] = rawCommand.replace(/\//, "").split("@");
-
-                let args = [];
-                if (entity.offset + entity.length < message.text.length) {
-                    args = message.text.slice(entity.offset + entity.length + 1).split(" ");
-                }
-
+            if (messageIsCommand(message)) {
+                const {command, args} = parseCommand(message);
                 this.emitter.emit("_command", {message, command, args});
             } else if (message.query !== undefined) {
                 const parts = message.query.split(" ");

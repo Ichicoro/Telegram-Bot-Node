@@ -2,9 +2,8 @@ const Plugin = require("./../Plugin");
 const Util = require("./../Util");
 
 module.exports = class MediaSet extends Plugin {
-
-    constructor(...args) {
-        super(...args);
+    constructor(obj) {
+        super(obj);
 
         if (!this.db.triggers) {
             this.db.triggers = {};
@@ -19,14 +18,14 @@ module.exports = class MediaSet extends Plugin {
         return {
             name: "MediaSet",
             description: "Media-capable set command",
-            help: '/mset `trigger`'
+            help: "/mset `trigger`, /munset `trigger`"
         };
     }
 
     onText({message}) {
-        const text = message.text;
-
         if (!this.db.triggers[message.chat.id]) return;
+
+        const text = message.text;
         const triggers = this.db.triggers[message.chat.id];
 
         for (const trigger in triggers) {
@@ -39,19 +38,28 @@ module.exports = class MediaSet extends Plugin {
             this.log.verbose("Match on " + Util.buildPrettyChatName(message.chat));
             switch (media.type) {
             case "audio":
-                return this.sendAudio(message.chat.id, media.fileId);
+                this.sendAudio(message.chat.id, media.fileId);
+                break;
             case "document":
-                return this.sendDocument(message.chat.id, media.fileId);
+                this.sendDocument(message.chat.id, media.fileId);
+                break;
             case "photo":
-                return this.sendPhoto(message.chat.id, media.fileId);
+                this.sendPhoto(message.chat.id, media.fileId);
+                break;
             case "sticker":
-                return this.sendSticker(message.chat.id, media.fileId);
+                this.sendSticker(message.chat.id, media.fileId);
+                break;
             case "video":
-                return this.sendVideo(message.chat.id, media.fileId);
+                this.sendVideo(message.chat.id, media.fileId);
+                break;
+            case "video_note":
+                this.sendVideoNote(message.chat.id, media.fileId);
+                break;
             case "voice":
-                return this.sendVoice(message.chat.id, media.fileId);
+                this.sendVoice(message.chat.id, media.fileId);
+                break;
             default:
-                throw new Error("Unrecognized type");
+                this.log.error(`Unrecognized media type: ${media.type}`);
             }
         }
     }
@@ -71,35 +79,42 @@ module.exports = class MediaSet extends Plugin {
     onVideo({message}) {
         this.setStepTwo(message, "video");
     }
+    onVideoNote({message}) {
+        this.setStepTwo(message, "video_note");
+    }
     onVoice({message}) {
         this.setStepTwo(message, "voice");
     }
 
     onCommand({message, command, args}) {
-        if (command !== "mset") return;
-        if (args.length !== 1)
-            return this.sendMessage(
-                message.chat.id,
-                "Syntax: /mset `trigger`",
-                {
-                    parse_mode: "Markdown"
-                }
-            );
-
-        this.log.verbose("Triggered stepOne on " + Util.buildPrettyChatName(message.chat));
-
-        if (!this.db.pendingRequests[message.chat.id])
-            this.db.pendingRequests[message.chat.id] = {};
-
-        this.sendMessage(message.chat.id, "Perfect! Now send me the media as a reply to this message!")
-        .then(({message_id}) => {
-            this.db.pendingRequests[message.chat.id][message_id] = args[0];
-        });
+        const chatID = message.chat.id;
+        const trigger = args[0];
+        switch (command) {
+        case "mset":
+            if (args.length !== 1)
+                return this.sendMessage(chatID, "Syntax: `/mset trigger`", {parse_mode: "Markdown"});
+            this.log.verbose("Triggered stepOne on " + Util.buildPrettyChatName(message.chat));
+            if (!this.db.pendingRequests[chatID])
+                this.db.pendingRequests[chatID] = {};
+            this.sendMessage(chatID, "Perfect! Now send me the media as a reply to this message!")
+                .then(({message_id}) => {
+                    this.db.pendingRequests[chatID][message_id] = trigger;
+                });
+            break;
+        case "munset":
+        case "moonset":
+            if (args.length !== 1)
+                return this.sendMessage(chatID, "Syntax: `/munset trigger` (or `/moonset trigger`)", {parse_mode: "Markdown"});
+            delete this.db.triggers[chatID][trigger];
+            this.log.verbose("Removed trigger " + trigger + " on " + Util.buildPrettyChatName(message.chat));
+            this.sendMessage(chatID, "Done!");
+            break;
+        }
     }
 
     setStepTwo(message, mediaType) {
         // is this a reply for a "now send media" message?
-        if (!message.hasOwnProperty('reply_to_message')) return;
+        if (!message.hasOwnProperty("reply_to_message")) return;
         // are there pending requests for this chat?
         if (!this.db.pendingRequests[message.chat.id]) return;
 

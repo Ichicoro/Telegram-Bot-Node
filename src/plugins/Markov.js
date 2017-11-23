@@ -7,7 +7,7 @@ function arraySample(arr) {
 class Blather {
     constructor({
         isStart = (key, index) => index === 0,
-        clean = textArray => textArray.join(' '),
+        clean = textArray => textArray.join(" "),
         split = text => text.split(/\s+/),
         depth = 2,
         joiner = "<|>",
@@ -71,9 +71,8 @@ class Blather {
 }
 
 module.exports = class Markov extends Plugin {
-
-    constructor(...args) {
-        super(...args);
+    constructor(obj) {
+        super(obj);
 
         if (this.db) {
             this.m = Blather.destringify(JSON.stringify(this.db));

@@ -1,78 +1,88 @@
 const Plugin = require("./../Plugin");
+const Util = require("../Util");
 
 module.exports = class Kick extends Plugin {
-
     static get plugin() {
         return {
             name: "Kick",
             description: "Kicks users",
-            help: "Reply with /kick or ban, or send /[kick|ban] ID."
+            help: "Reply with /kick or /ban, or send /[kick|ban] ID."
         };
     }
 
-    constructor(listener, bot, config, auth) {
-        super(listener, bot, config, auth);
+    constructor(obj) {
+        super(obj);
 
-        this.auth = auth;
+        this.auth = obj.auth;
     }
 
-    onCommand({message, command, args}) {
-        let target;
-        if (args.length === 1) target = Number(args[0]);
-        else if (message.reply_to_message) {
-            if (message.reply_to_message.new_chat_participant)
-                target = message.reply_to_message.new_chat_participant.id;
-            else if (message.reply_to_message.left_chat_participant)
-                target = message.reply_to_message.left_chat_participant.id;
-            else
-                target = message.reply_to_message.from.id;
-        } else
-            target = null;
-
-        const banned = this.db[message.chat.id];
-
-        switch (command) {
-        case "list":
-            return this.sendMessage(message.chat.id, JSON.stringify(this.db["chat" + message.chat.id]));
-        case "banlist":
-            if (!this.db[message.chat.id]) return this.sendMessage(message.chat.id, "Empty.");
-            return this.sendMessage(message.chat.id, JSON.stringify(this.db[message.chat.id]));
-        case "kick":
-            if (!this.auth.isMod(message.from.id)) return;
-            if (!target) return this.sendMessage(message.chat.id, "Reply to a message sent by the kickee with /kick or /ban to remove him. Alternatively, use /kick or /ban followed by the user ID (eg. /kick 1234), which you can get with `/id username` if the UserInfo plugin is enabled.");
-            if (this.auth.isMod(target)) return this.sendMessage(message.chat.id, "Can't kick mods or admins.");
-            this.kickChatMember(message.chat.id, target).catch(err => this.sendMessage(message.chat.id, "An error occurred while kicking the user: " + err));
-            return;
-        case "ban":
-            if (!this.auth.isMod(message.from.id)) return;
-            if (!target) return this.sendMessage(message.chat.id, "Reply to a message sent by the kickee with /kick or /ban to remove him. Alternatively, use /kick or /ban followed by the user ID (eg. /kick 1234), which you can get with `/id username` if the UserInfo plugin is enabled.");
-            if (this.auth.isMod(target)) return this.sendMessage(message.chat.id, "Can't ban mods or admins.");
-            if (!banned)
-                this.db[message.chat.id] = [];
-            this.db[message.chat.id].push(target);
-            this.kickChatMember(message.chat.id, target).catch(err => this.sendMessage(message.chat.id, "An error occurred while kicking the user: " + err));
-            return;
-        case "pardon":
-            if (!this.auth.isMod(message.from.id)) return;
-            if (!target) return this.sendMessage(message.chat.id, "Reply to a message sent by the kickee with /kick or /ban to remove him. Alternatively, use /kick or /ban followed by the user ID (eg. /kick 1234), which you can get with `/id username` if the UserInfo plugin is enabled.");
-            if (!banned) return;
-            this.db[message.chat.id] = banned.filter(id => id !== target);
-            this.sendMessage(message.chat.id, "Pardoned.");
-            return;
-        default:
-            return;
-        }
+    get commands() {
+        return {
+            banlist: ({message}) => {
+                const chatID = message.chat.id;
+                if (!this.db[chatID])
+                    return "Empty.";
+                return JSON.stringify(this.db[chatID]);
+            },
+            kick: ({message, args}) => {
+                if (!this.auth.isMod(message.from.id, message.chat.id))
+                    return "Insufficient privileges.";
+                const target = Util.getTargetID(message, args, "kick");
+                if (typeof target === "string") return target;
+                if (this.auth.isMod(target, message.chat.id))
+                    return "Can't kick mods or admins (demote the target first).";
+                this.kick(message, target);
+                return "Kicked.";
+            },
+            ban: ({message, args}) => {
+                if (!this.auth.isMod(message.from.id, message.chat.id))
+                    return "Insufficient privileges.";
+                const target = Util.getTargetID(message, args, "ban");
+                if (typeof target === "string") return target;
+                if (this.auth.isMod(target, message.chat.id))
+                    return "Can't ban mods or admins (demote the target first).";
+                this.ban(message, target);
+                this.kick(message, target);
+                return "Banned.";
+            },
+            pardon: ({message, args}) => {
+                if (!this.auth.isMod(message.from.id, message.chat.id))
+                    return "Insufficient privileges.";
+                const target = Util.getTargetID(message, args, "pardon");
+                if (typeof target === "string") return target;
+                if (!this.db[message.chat.id])
+                    return "It seems that there are no banned users.";
+                this.db[message.chat.id] = this.db[message.chat.id].filter(id => id !== target);
+                return "Pardoned.";
+            }
+        };
     }
 
-    onNewChatParticipant({message}) {
+    kick(message, target) {
+        this.kickChatMember(message.chat.id, target)
+            .catch(err => this.sendMessage(message.chat.id, "An error occurred while kicking the user: " + err));
+    }
+
+    // Note that banning does not imply kicking.
+    ban(message, target) {
+        if (!this.db[message.chat.id])
+            this.db[message.chat.id] = [];
+        this.db[message.chat.id].push(target);
+    }
+
+    onNewChatMembers({message}) {
+        const chatID = message.chat.id;
         // If there is no database, nobody was ever banned so far. Return early.
-        if (!this.db[message.chat.id]) return;
+        if (!this.db[chatID]) return;
 
-        const target = message.new_chat_participant.id;
-
-        if (this.db[message.chat.id].indexOf(target) === -1) return;
-        if (this.auth.isMod(target)) return;
-
-        this.kickChatMember(message.chat.id, target).catch(err => this.sendMessage(message.chat.id, "An error occurred while kicking the user: " + err));
+        for (const member of message.new_chat_members) {
+            const target = member.id;
+            if (!this.db[chatID].includes(target))
+                continue;
+            if (this.auth.isMod(target, message.chat.id))
+                continue;
+            this.kickChatMember(chatID, target)
+                .catch(err => this.sendMessage(message.chat.id, "An error occurred while kicking the user: " + err));
+        }
     }
 };
